@@ -1,0 +1,13 @@
+langchain
+faiss-cpu
+sentence-transformers
+langchain_google_genai
+langchain_community
+langchain_huggingface
+langchain-text-splitters
+pydantic
+fastapi
+uvicorn
+sqlalchemy
+faker
+python-dotenv
