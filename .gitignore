@@ -1,4 +1,8 @@
 /environment
+__pycache__/
+chroma.db/
+Resumes/
+
 /Resumes
 testing.ipynb
 .env

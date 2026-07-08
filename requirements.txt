@@ -11,3 +11,7 @@ python-dotenv
 langchain-chroma
 pypdf
 tiktoken
+streamlit
+python-multipart
+requests
+pymupdf
