@@ -15,7 +15,24 @@ st.set_page_config(
 )
 
 # API Base URL
-API_URL = "http://localhost:8000"
+
+def get_api_base_url():
+    configured = os.getenv("API_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+
+    for port in [8000, 8001, 8002, 8003]:
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            requests.get(f"{base_url}/resumes", timeout=1.5)
+            return base_url
+        except requests.RequestException:
+            continue
+
+    return "http://127.0.0.1:8000"
+
+
+API_URL = get_api_base_url()
 
 # Premium CSS Injection for sleek glassmorphic UI and custom styles
 st.markdown("""
@@ -105,7 +122,7 @@ st.markdown("""
 # Helper: Fetch Resumes List
 def fetch_resumes():
     try:
-        response = requests.get(f"{API_URL}/resumes")
+        response = requests.get(f"{get_api_base_url()}/resumes", timeout=5)
         if response.status_code == 200:
             return response.json()
         return []
@@ -135,7 +152,7 @@ with st.sidebar:
             
             with st.spinner("Uploading files..."):
                 try:
-                    response = requests.post(f"{API_URL}/upload", files=files_to_send)
+                    response = requests.post(f"{get_api_base_url()}/upload", files=files_to_send, timeout=10)
                     if response.status_code == 200:
                         st.success(f"Uploaded {len(uploaded_files)} resumes successfully!")
                         st.rerun()
@@ -151,7 +168,7 @@ with st.sidebar:
     if st.button("🏗️ Rebuild Vector DB"):
         with st.spinner("Processing resumes and building index..."):
             try:
-                response = requests.post(f"{API_URL}/ingest")
+                response = requests.post(f"{get_api_base_url()}/ingest", timeout=20)
                 if response.status_code == 200:
                     st.success("Vector DB rebuilt successfully!")
                 else:
@@ -190,8 +207,9 @@ if st.button("🔍 Search & Analyze") or (query_text and st.session_state.get("r
         with st.spinner("Retrieving resume content and generating answer..."):
             try:
                 response = requests.post(
-                    f"{API_URL}/query",
-                    json={"query": query_text}
+                    f"{get_api_base_url()}/query",
+                    json={"query": query_text},
+                    timeout=20
                 )
                 
                 if response.status_code == 200:

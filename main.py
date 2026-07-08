@@ -5,6 +5,8 @@ import os
 import shutil
 from pathlib import Path
 from typing import List
+import socket
+import uvicorn
 
 # LangChain and RAG Imports
 from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate, ChatPromptTemplate
@@ -30,9 +32,37 @@ app.add_middleware(
 )
 
 # Directories
-RESUMES_DIR = Path("Resumes")
-INITIAL_RESUMES_DIR = Path("data/Resume/Resume_File (File responses)")
-CHROMA_DIR = Path("chroma.db")
+BASE_DIR = Path(__file__).resolve().parent
+RESUMES_DIR = BASE_DIR / "Resumes"
+INITIAL_RESUMES_DIR = BASE_DIR / "data" / "Resume" / "Resume_File (File responses)"
+CHROMA_DIR = BASE_DIR / "chroma.db"
+HOST = os.getenv("HOST", "127.0.0.1")
+
+
+def get_chroma_dir() -> Path:
+    candidates = [
+        BASE_DIR / "chroma.db",
+        Path.cwd() / "chroma.db",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def resolve_port(requested_port: int) -> int:
+    for port in [requested_port, *range(requested_port + 1, requested_port + 20)]:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((HOST, port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError("No available port found for the FastAPI backend.")
+
+
+PORT = resolve_port(int(os.getenv("PORT", "8000")))
 
 # Setup folder structure on startup
 @app.on_event("startup")
@@ -71,15 +101,26 @@ def get_resumes():
 
 @app.post("/upload")
 async def upload_resumes(files: List[UploadFile] = File(...)):
-    """Upload one or more resumes."""
+    """Upload one or more resumes and index them into the existing vector store."""
     RESUMES_DIR.mkdir(exist_ok=True)
     saved_files = []
+    saved_paths = []
+
     for file in files:
         file_path = RESUMES_DIR / file.filename
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         saved_files.append(file.filename)
-    return {"message": f"Successfully uploaded {len(saved_files)} files.", "files": saved_files}
+        saved_paths.append(file_path)
+
+    if saved_paths:
+        try:
+            from ingestion.embeddings import create_embeddings
+            create_embeddings(file_paths=saved_paths)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Files uploaded but indexing failed: {str(exc)}")
+
+    return {"message": f"Successfully uploaded and indexed {len(saved_files)} files.", "files": saved_files}
 
 @app.post("/ingest")
 def ingest_resumes():
@@ -115,7 +156,8 @@ def query_resumes(request: QueryRequest):
         os.environ["GOOGLE_API_KEY"] = api_key
 
     # Check if vector DB exists
-    if not CHROMA_DIR.exists():
+    chroma_dir = get_chroma_dir()
+    if not chroma_dir.exists() or not any(chroma_dir.iterdir()):
         raise HTTPException(status_code=400, detail="Vector database not found. Please ingest resumes first.")
 
     try:
@@ -125,7 +167,8 @@ def query_resumes(request: QueryRequest):
             temperature=0
         )
         embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-        vectorstore = Chroma(persist_directory=str(CHROMA_DIR), embedding_function=embeddings)
+        chroma_path = get_chroma_dir()
+        vectorstore = Chroma(persist_directory=str(chroma_path), embedding_function=embeddings)
         
         # Retrieve context
         retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 1})
@@ -197,3 +240,8 @@ Answer the user's question strictly using the retrieved context.
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+if __name__ == "__main__":
+    print(f"Starting backend on http://{HOST}:{PORT}")
+    uvicorn.run(app, host=HOST, port=PORT, reload=False)
