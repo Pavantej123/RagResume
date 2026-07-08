@@ -8,3 +8,6 @@ pydantic
 fastapi
 uvicorn
 python-dotenv
+langchain-chroma
+pypdf
+tiktoken
