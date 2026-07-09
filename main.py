@@ -37,6 +37,9 @@ RESUMES_DIR = BASE_DIR / "Resumes"
 INITIAL_RESUMES_DIR = BASE_DIR / "data" / "Resume" / "Resume_File (File responses)"
 CHROMA_DIR = BASE_DIR / "chroma.db"
 HOST = os.getenv("HOST", "127.0.0.1")
+EMBEDDINGS_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+embeddings = None
+vectorstore = None
 
 
 def get_chroma_dir() -> Path:
@@ -48,6 +51,33 @@ def get_chroma_dir() -> Path:
         if path.exists():
             return path
     return candidates[0]
+
+
+def has_vector_db() -> bool:
+    chroma_dir = get_chroma_dir()
+    return chroma_dir.exists() and any(chroma_dir.iterdir())
+
+
+def get_embeddings():
+    global embeddings
+    if embeddings is None:
+        embeddings = HuggingFaceEmbeddings(model_name=EMBEDDINGS_MODEL_NAME)
+    return embeddings
+
+
+def refresh_vectorstore():
+    global vectorstore
+    vectorstore = None
+
+
+def load_vectorstore():
+    global vectorstore
+    chroma_dir = get_chroma_dir()
+    if not chroma_dir.exists() or not any(chroma_dir.iterdir()):
+        raise HTTPException(status_code=400, detail="Vector database not found. Please ingest resumes first.")
+    if vectorstore is None:
+        vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=get_embeddings())
+    return vectorstore
 
 
 def resolve_port(requested_port: int) -> int:
@@ -79,6 +109,15 @@ def startup_event():
                 if file.is_file():
                     shutil.copy(file, RESUMES_DIR / file.name)
             print(f"Copied {len(list(RESUMES_DIR.glob('*')))} resumes.")
+
+    # Preload embeddings and vectorstore from existing DB if available.
+    try:
+        if has_vector_db():
+            print("Loading vectorstore and embeddings at startup...")
+            load_vectorstore()
+            print("Vectorstore loaded.")
+    except Exception as exc:
+        print(f"Warning: could not load existing vectorstore on startup: {exc}")
 
 # API Models
 class QueryRequest(BaseModel):
@@ -117,6 +156,7 @@ async def upload_resumes(files: List[UploadFile] = File(...)):
         try:
             from ingestion.embeddings import create_embeddings
             create_embeddings(file_paths=saved_paths)
+            refresh_vectorstore()
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Files uploaded but indexing failed: {str(exc)}")
 
@@ -132,8 +172,9 @@ def ingest_resumes():
         if not RESUMES_DIR.exists() or len(list(RESUMES_DIR.glob("*"))) == 0:
             raise HTTPException(status_code=400, detail="No resumes found in the Resumes directory to ingest.")
         
-        # Run create_embeddings (which calls document_loader.get_documents("Resumes"))
-        create_embeddings()
+        # Rebuild the vector DB from all current resumes
+        create_embeddings(force_rebuild=True)
+        refresh_vectorstore()
         return {"status": "success", "message": "Resumes ingested and vector DB created successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
@@ -155,20 +196,17 @@ def query_resumes(request: QueryRequest):
     else:
         os.environ["GOOGLE_API_KEY"] = api_key
 
-    # Check if vector DB exists
-    chroma_dir = get_chroma_dir()
-    if not chroma_dir.exists() or not any(chroma_dir.iterdir()):
-        raise HTTPException(status_code=400, detail="Vector database not found. Please ingest resumes first.")
+    # Check if vector DB exists and otherwise fail fast
+    if not has_vector_db():
+        raise HTTPException(status_code=400, detail="Vector database not found. Please ingest resumes first or upload resumes and rebuild the vector DB.")
 
     try:
         # Setup LangChain components
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash-lite",
             temperature=0
         )
-        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-        chroma_path = get_chroma_dir()
-        vectorstore = Chroma(persist_directory=str(chroma_path), embedding_function=embeddings)
+        vectorstore = load_vectorstore()
         
         # Retrieve context
         retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 1})
@@ -213,6 +251,7 @@ Always follow this decision process:
   - No → "I do not have enough content to answer this question."
 - Otherwise:
   - Answer only from the retrieved context without adding any external knowledge.
+- answer should not exceed 50 words.
 
 Never fabricate, guess, or supplement missing information.
                                                        """),
@@ -224,6 +263,7 @@ User Question:
 {query}
 
 Answer the user's question strictly using the retrieved context.
+                                                
 """)
         ])
         

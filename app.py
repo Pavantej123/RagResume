@@ -209,28 +209,41 @@ if st.button("🔍 Search & Analyze") or (query_text and st.session_state.get("r
                 response = requests.post(
                     f"{get_api_base_url()}/query",
                     json={"query": query_text},
-                    timeout=20
+                    timeout=120
                 )
                 
                 if response.status_code == 200:
                     result = response.json()
                     
                     st.markdown("### 🤖 Answer:")
-                    # Display the answer in a beautiful markdown format
                     st.info(result["response"])
                     
-                    # If source content is returned, display it
-                    if result["source_content"]:
+                    if result.get("source_content") or result.get("source_metadata"):
                         st.markdown("---")
-                        with st.expander("📚 View Retrieved Source Context"):
+                        with st.expander("📚 Retrieved Document & Metadata"):
                             source_meta = result.get("source_metadata", {})
-                            source_file = source_meta.get("source", "Unknown file")
-                            # Strip path info from filename
-                            source_filename = os.path.basename(source_file)
-                            page_num = source_meta.get("page", 0) + 1
+                            source_file = source_meta.get("source", source_meta.get("source_file", "Unknown file"))
+                            source_filename = os.path.basename(source_file) if source_file else "Unknown file"
+                            page_num = source_meta.get("page")
+                            if page_num is not None:
+                                page_label = f" (Page {page_num + 1})"
+                            else:
+                                page_label = ""
                             
-                            st.markdown(f"**Source Document:** `{source_filename}` (Page {page_num})")
-                            st.markdown(f"<div class='source-card'>{result['source_content']}</div>", unsafe_allow_html=True)
+                            st.markdown(f"**Source Document:** `{source_filename}`{page_label}")
+                            
+                            if source_meta:
+                                st.markdown("**Metadata:**")
+                                meta_items = []
+                                for key, value in source_meta.items():
+                                    meta_items.append(f"- **{key}**: `{value}`")
+                                st.markdown("\n".join(meta_items))
+                            else:
+                                st.markdown("*No metadata returned.*")
+                            
+                            if result.get("source_content"):
+                                st.markdown("**Retrieved Text Snippet:**")
+                                st.markdown(f"<div class='source-card'>{result['source_content']}</div>", unsafe_allow_html=True)
                 else:
                     st.error(f"Error from server: {response.json().get('detail', 'Unknown error')}")
             except Exception as e:
